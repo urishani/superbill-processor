@@ -12,7 +12,6 @@ UI tool to:
 import tkinter as tk
 from tkinter import ttk, filedialog
 import os
-import glob
 import threading
 
 import pandas as pd
@@ -213,18 +212,18 @@ def process(input_path, output_path, log):
 
     if duplicates:
         log("")
-        log(f"🛑  DUPLICATE rows found in output (matched by Date / Patient / Billing Code):")
+        log(f"⚠  {len(duplicates)} DUPLICATE row(s) already in output – skipping them (matched by Date / Patient / Billing Code):")
         log(f"    {'Date of Service':<15}  {'Patient Name':<30}  {'Billing Code'}")
         log(f"    {'-'*15}  {'-'*30}  {'-'*15}")
         for d in duplicates:
             log(f"    {d[0]:<15}  {d[1]:<30}  {d[2]}")
         log("")
-        log("⛔  Processing stopped. No rows were added.")
-        try:
-            wb_out.save(output_path)
-        except Exception:
-            pass
-        return False
+    else:
+        log("✓  No duplicate rows found.")
+
+    if not rows_to_add:
+        log("ℹ  Nothing new to add – all input rows already exist in the output.")
+        return True
 
     # ── 5. Append rows ───────────────────────────────────────────────────────
     max_out_col = max(COL_MAP_INPUT_TO_OUTPUT.values()) + 1
@@ -258,7 +257,6 @@ class App(tk.Tk):
         self.title("Superbill Processor")
         self.resizable(True, True)
         self.minsize(700, 500)
-        self._search_job = None
         self._build_ui()
 
     # ── layout ────────────────────────────────────────────────────────────────
@@ -270,35 +268,12 @@ class App(tk.Tk):
         frm_in = ttk.LabelFrame(self, text="Input Superbill file")
         frm_in.pack(fill="x", **pad)
 
-        ttk.Label(frm_in, text="Search by name:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", self._on_search_changed)
-        self.search_entry = ttk.Entry(frm_in, textvariable=self.search_var, width=40)
-        self.search_entry.grid(row=0, column=1, sticky="ew", padx=4, pady=4)
-
-        ttk.Button(frm_in, text="Browse…", command=self._browse_input).grid(row=0, column=2, padx=4)
-        ttk.Button(frm_in, text="Browse folder…", command=self._browse_input_dir).grid(row=0, column=3, padx=4)
-
-        self.search_dir_var = tk.StringVar(value=os.path.expanduser("~"))
-        ttk.Label(frm_in, text="Search in:").grid(row=1, column=0, sticky="w", padx=6, pady=2)
-        ttk.Label(frm_in, textvariable=self.search_dir_var, foreground="gray",
-                  wraplength=480, anchor="w").grid(row=1, column=1, columnspan=3, sticky="ew", padx=4)
-
-        # results listbox
-        self.results_lb = tk.Listbox(frm_in, height=5, selectmode="single")
-        self.results_lb.grid(row=2, column=0, columnspan=4, sticky="ew", padx=6, pady=4)
-        self.results_lb.bind("<<ListboxSelect>>", self._on_result_selected)
-
-        sb = ttk.Scrollbar(frm_in, orient="vertical", command=self.results_lb.yview)
-        sb.grid(row=2, column=4, sticky="ns", pady=4)
-        self.results_lb.configure(yscrollcommand=sb.set)
-
-        frm_in.columnconfigure(1, weight=1)
-
         self.input_path_var = tk.StringVar()
-        ttk.Label(frm_in, text="Selected:").grid(row=3, column=0, sticky="w", padx=6, pady=2)
-        ttk.Label(frm_in, textvariable=self.input_path_var, foreground="blue",
-                  wraplength=480, anchor="w").grid(row=3, column=1, columnspan=3, sticky="ew", padx=4)
+        ttk.Label(frm_in, text="File:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(frm_in, textvariable=self.input_path_var, width=55).grid(
+            row=0, column=1, sticky="ew", padx=4, pady=4)
+        ttk.Button(frm_in, text="Browse…", command=self._browse_input).grid(row=0, column=2, padx=4)
+        frm_in.columnconfigure(1, weight=1)
 
         # ── Output file section ───────────────────────────────────────────────
         frm_out = ttk.LabelFrame(self, text="Output file")
@@ -330,44 +305,12 @@ class App(tk.Tk):
 
         ttk.Button(self, text="Clear log", command=self._clear_log).pack(anchor="e", padx=10, pady=(0, 6))
 
-    # ── file search helpers ───────────────────────────────────────────────────
-
-    def _on_search_changed(self, *_):
-        if self._search_job:
-            self.after_cancel(self._search_job)
-        self._search_job = self.after(300, self._do_search)
-
-    def _do_search(self):
-        term = self.search_var.get().strip()
-        search_dir = self.search_dir_var.get()
-        self.results_lb.delete(0, "end")
-        if not term or not os.path.isdir(search_dir):
-            return
-        pattern = os.path.join(search_dir, "**", f"*{term}*")
-        matches = glob.glob(pattern, recursive=True)
-        matches = [m for m in matches if m.lower().endswith((".xls", ".xlsx"))][:50]
-        for m in matches:
-            self.results_lb.insert("end", m)
-
-    def _on_result_selected(self, _event=None):
-        sel = self.results_lb.curselection()
-        if sel:
-            path = self.results_lb.get(sel[0])
-            self.input_path_var.set(path)
-
     def _browse_input(self):
         path = filedialog.askopenfilename(
             title="Select input Superbill file",
             filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")])
         if path:
             self.input_path_var.set(path)
-            self.search_dir_var.set(os.path.dirname(path))
-
-    def _browse_input_dir(self):
-        d = filedialog.askdirectory(title="Select folder to search in")
-        if d:
-            self.search_dir_var.set(d)
-            self._do_search()
 
     def _browse_output(self):
         path = filedialog.askopenfilename(
