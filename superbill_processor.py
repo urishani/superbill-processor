@@ -9,8 +9,11 @@ UI tool to:
  - Skip duplicate rows (identified by cols A, B, O in input / A, C, I in output)
 """
 
+import sys
 import tkinter as tk
 from tkinter import ttk, filedialog
+import tkinterdnd2 as dnd
+import re
 import os
 import shutil
 import tempfile
@@ -181,7 +184,7 @@ def process(input_path, output_path, log, confirm):
     duplicates   = []
     rows_to_add  = []
 
-    for _, row in df_raw.iterrows():
+    for idx, row in df_raw.iterrows():
         def cell(col_idx, _row=row):
             if col_idx >= len(raw_cols):
                 return ""
@@ -193,18 +196,22 @@ def process(input_path, output_path, log, confirm):
             cell(IDENTITY_INPUT_COLS[1]),
             cell(IDENTITY_INPUT_COLS[2]),
         )
+        # Skip rows with no identifying information
+        if all(v == "" for v in key):
+            continue
+        excel_row = INPUT_HEADER_ROW + 2 + idx  # 1-based Excel row number
         if key in existing_keys:
-            duplicates.append(key)
+            duplicates.append((excel_row, key))
         else:
             rows_to_add.append(row)
 
     if duplicates:
         log("")
         log(f"⚠  {len(duplicates)} duplicate row(s) already exist in the output:")
-        log(f"    {'Date of Service':<15}  {'Patient Name':<30}  {'Billing Code'}")
-        log(f"    {'-'*15}  {'-'*30}  {'-'*15}")
-        for d in duplicates:
-            log(f"    {d[0]:<15}  {d[1]:<30}  {d[2]}")
+        log(f"    {'Row':<5}  {'Date of Service':<15}  {'Patient Name':<30}  {'Billing Code'}")
+        log(f"    {'-'*5}  {'-'*15}  {'-'*30}  {'-'*15}")
+        for excel_row, d in duplicates:
+            log(f"    {excel_row:<5}  {d[0]:<15}  {d[1]:<30}  {d[2]}")
         log("")
         log(f"  {len(rows_to_add)} new row(s) would be appended.")
         if not confirm(f"{len(duplicates)} duplicate(s) found (listed above).\n"
@@ -315,7 +322,114 @@ def process(input_path, output_path, log, confirm):
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 
-class App(tk.Tk):
+_README_PATH = os.path.join(
+    getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))),
+    "README.md"
+)
+
+
+def _show_about():
+    """Open a Toplevel window that renders README.md with basic Markdown styling."""
+    win = tk.Toplevel()
+    win.title("About – Superbill Processor")
+    win.geometry("720x580")
+    win.resizable(True, True)
+
+    frm = ttk.Frame(win)
+    frm.pack(fill="both", expand=True, padx=10, pady=10)
+
+    txt = tk.Text(frm, wrap="word", state="disabled",
+                  font=("Segoe UI", 10), background="#ffffff",
+                  foreground="#1e1e1e", relief="flat", padx=12, pady=8)
+    txt.pack(side="left", fill="both", expand=True)
+    sb = ttk.Scrollbar(frm, orient="vertical", command=txt.yview)
+    sb.pack(side="right", fill="y")
+    txt.configure(yscrollcommand=sb.set)
+
+    # Define tags
+    txt.tag_configure("h1",    font=("Segoe UI", 18, "bold"), spacing3=6)
+    txt.tag_configure("h2",    font=("Segoe UI", 14, "bold"), spacing1=10, spacing3=4)
+    txt.tag_configure("h3",    font=("Segoe UI", 11, "bold"), spacing1=8, spacing3=2)
+    txt.tag_configure("bold",  font=("Segoe UI", 10, "bold"))
+    txt.tag_configure("code",  font=("Consolas", 9), background="#f0f0f0", foreground="#c7254e")
+    txt.tag_configure("block", font=("Consolas", 9), background="#f5f5f5",
+                      lmargin1=20, lmargin2=20, spacing1=2, spacing3=2)
+    txt.tag_configure("bullet", lmargin1=16, lmargin2=28)
+    txt.tag_configure("table",  font=("Consolas", 9), lmargin1=16, lmargin2=16)
+    txt.tag_configure("normal", font=("Segoe UI", 10))
+
+    try:
+        with open(_README_PATH, encoding="utf-8") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        lines = ["*README.md not found.*\n"]
+
+    txt.configure(state="normal")
+    in_code_block = False
+    for raw in lines:
+        line = raw.rstrip("\n")
+
+        # Fenced code block toggle
+        if line.startswith("```"):
+            in_code_block = not in_code_block
+            txt.insert("end", "\n")
+            continue
+
+        if in_code_block:
+            txt.insert("end", line + "\n", "block")
+            continue
+
+        # Table rows (contain |)
+        if "|" in line and line.strip().startswith("|"):
+            # Skip separator rows like |---|---|
+            if re.fullmatch(r"[\s|\-:]+", line):
+                continue
+            txt.insert("end", line + "\n", "table")
+            continue
+
+        # Headings
+        m = re.match(r"^(#{1,3})\s+(.*)", line)
+        if m:
+            level = len(m.group(1))
+            txt.insert("end", m.group(2) + "\n", ("h1", "h2", "h3")[level - 1])
+            continue
+
+        # Bullet list items
+        m = re.match(r"^[-*]\s+(.*)", line)
+        if m:
+            _insert_inline(txt, "• " + m.group(1) + "\n", "bullet")
+            continue
+
+        # Blank line
+        if not line.strip():
+            txt.insert("end", "\n")
+            continue
+
+        # Normal paragraph line
+        _insert_inline(txt, line + "\n", "normal")
+
+    txt.configure(state="disabled")
+    ttk.Button(win, text="Close", command=win.destroy).pack(pady=(0, 8))
+
+
+def _insert_inline(txt: tk.Text, text: str, base_tag: str):
+    """Insert text into a tk.Text widget, handling **bold** and `inline code`."""
+    pattern = re.compile(r"(\*\*.+?\*\*|`.+?`)")   
+    pos = 0
+    for m in pattern.finditer(text):
+        # plain segment before the match
+        if m.start() > pos:
+            txt.insert("end", text[pos:m.start()], base_tag)
+        token = m.group()
+        if token.startswith("**"):
+            txt.insert("end", token[2:-2], (base_tag, "bold"))
+        else:  # backtick
+            txt.insert("end", token[1:-1], (base_tag, "code"))
+        pos = m.end()
+    if pos < len(text):
+        txt.insert("end", text[pos:], base_tag)
+
+class App(dnd.TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
         self.title("Superbill Processor")
@@ -336,10 +450,12 @@ class App(tk.Tk):
 
         self.input_path_var = tk.StringVar()
         ttk.Label(frm_in, text="File:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(frm_in, textvariable=self.input_path_var, width=55).grid(
-            row=0, column=1, sticky="ew", padx=4, pady=4)
+        ent_in = ttk.Entry(frm_in, textvariable=self.input_path_var, width=55)
+        ent_in.grid(row=0, column=1, sticky="ew", padx=4, pady=4)
         ttk.Button(frm_in, text="Browse…", command=self._browse_input).grid(row=0, column=2, padx=4)
         frm_in.columnconfigure(1, weight=1)
+        ent_in.drop_target_register(dnd.DND_FILES)
+        ent_in.dnd_bind("<<Drop>>", lambda e: self.input_path_var.set(self._clean_drop(e.data)))
 
         # ── Output file section ───────────────────────────────────────────────
         frm_out = ttk.LabelFrame(self, text="Output file")
@@ -347,15 +463,20 @@ class App(tk.Tk):
 
         self.output_path_var = tk.StringVar()
         ttk.Label(frm_out, text="File:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(frm_out, textvariable=self.output_path_var, width=55).grid(
-            row=0, column=1, sticky="ew", padx=4, pady=4)
+        ent_out = ttk.Entry(frm_out, textvariable=self.output_path_var, width=55)
+        ent_out.grid(row=0, column=1, sticky="ew", padx=4, pady=4)
         ttk.Button(frm_out, text="Open…", command=self._browse_output).grid(
             row=0, column=2, padx=4)
         frm_out.columnconfigure(1, weight=1)
+        ent_out.drop_target_register(dnd.DND_FILES)
+        ent_out.dnd_bind("<<Drop>>", lambda e: self.output_path_var.set(self._clean_drop(e.data)))
 
         # ── Run button ────────────────────────────────────────────────────────
-        self.run_btn = ttk.Button(self, text="▶  Process", command=self._run, width=20)
-        self.run_btn.pack(pady=6)
+        btn_row_top = ttk.Frame(self)
+        btn_row_top.pack(pady=6, fill="x", padx=10)
+        self.run_btn = ttk.Button(btn_row_top, text="▶  Process", command=self._run, width=20)
+        self.run_btn.pack(side="left")
+        ttk.Button(btn_row_top, text="ℹ  About", command=_show_about, width=12).pack(side="right")
 
         # ── Confirm / Abort prompt (hidden until needed) ──────────────────────
         self.frm_confirm = ttk.LabelFrame(self, text="Confirmation required")
@@ -389,6 +510,14 @@ class App(tk.Tk):
 
         ttk.Button(self, text="Clear log", command=self._clear_log).pack(
             anchor="e", padx=10, pady=(0, 6))
+
+    @staticmethod
+    def _clean_drop(data: str) -> str:
+        """Normalize a drag-and-drop path: strip curly braces added for paths with spaces."""
+        data = data.strip()
+        if data.startswith("{") and data.endswith("}"):
+            data = data[1:-1]
+        return data
 
     def _browse_input(self):
         path = filedialog.askopenfilename(
