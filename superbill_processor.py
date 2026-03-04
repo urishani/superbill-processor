@@ -308,7 +308,7 @@ class App(tk.Tk):
         ttk.Label(frm_out, text="File:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         ttk.Entry(frm_out, textvariable=self.output_path_var, width=55).grid(
             row=0, column=1, sticky="ew", padx=4, pady=4)
-        ttk.Button(frm_out, text="Browse / Create…", command=self._browse_output).grid(
+        ttk.Button(frm_out, text="Open…", command=self._browse_output).grid(
             row=0, column=2, padx=4)
         frm_out.columnconfigure(1, weight=1)
 
@@ -370,9 +370,8 @@ class App(tk.Tk):
             self._do_search()
 
     def _browse_output(self):
-        path = filedialog.asksaveasfilename(
-            title="Select or create output file",
-            defaultextension=".xlsx",
+        path = filedialog.askopenfilename(
+            title="Select existing output file to append to",
             filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")])
         if path:
             self.output_path_var.set(path)
