@@ -1,0 +1,21 @@
+{
+  "name": "superbill-processor",
+  "version": "1.0.0",
+  "description": "CLI tool to validate and append Superbill rows to an output workbook",
+  "main": "superbill_processor.js",
+  "scripts": {
+    "start": "node superbill_processor.js",
+    "build": "pkg superbill_processor.js --target node20-win-x64 --output dist/SuperbillProcessor.exe --compress GZip"
+  },
+  "pkg": {
+    "assets": [],
+    "targets": ["node20-win-x64"]
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "pkg": "^5.8.1"
+  }
+}

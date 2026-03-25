@@ -62,6 +62,30 @@ python superbill_processor.py
 5. All messages appear in the **Messages** pane. Click **Clear log** to reset it.
 6. Click **ℹ About** at any time to view this documentation.
 
+## Node.js CLI
+
+The Node.js version (`superbill_processor.js`) provides the same processing logic as a command-line tool. Install dependencies once with `npm install`, then use:
+
+```bash
+# Show usage
+node superbill_processor.js --help
+
+# Interactive — prompts before applying duplicate rows
+node superbill_processor.js <input.xlsx> <output.xlsx>
+
+# Batch — automatically proceeds without any prompts
+node superbill_processor.js <input.xlsx> <output.xlsx> --yes
+```
+
+### Switches
+
+| Switch | Description |
+|--------|-------------|
+| `--help` | Print usage information and exit |
+| `--yes` | Skip all confirmation prompts and proceed automatically |
+
+See [setup-node.md](setup-node.md) for full environment setup instructions.
+
 ## Input file format
 
 The tool expects a Lynx Superbill report `.xlsx` where:

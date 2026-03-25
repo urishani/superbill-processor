@@ -150,6 +150,13 @@ def process(input_path, output_path, log, confirm):
     df_raw.columns = [normalise_col(c) for c in df_raw.columns]
     df_raw.dropna(how="all", inplace=True)
     df_raw.reset_index(drop=True, inplace=True)
+
+    # Merged cells in Excel produce NaN in all but the first row of the merged range.
+    # Forward-fill identity columns so every sub-row inherits the parent cell's value.
+    for _col_idx in IDENTITY_INPUT_COLS:
+        if _col_idx < len(df_raw.columns):
+            df_raw.iloc[:, _col_idx] = df_raw.iloc[:, _col_idx].ffill()
+
     raw_cols = list(df_raw.columns)
 
     # ── 3. Load output file ───────────────────────────────────────────────────
