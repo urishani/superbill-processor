@@ -1,0 +1,6 @@
+# Superbill Processor + Lynx fetch automation
+pandas>=2.0
+openpyxl>=3.0
+tkinterdnd2>=0.3
+playwright>=1.40
+python-dotenv>=1.0

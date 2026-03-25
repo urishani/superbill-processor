@@ -86,6 +86,13 @@ Open the **integrated terminal** in VS Code (`Ctrl+`` ` ``) and run:
 pip install pandas openpyxl tkinterdnd2
 ```
 
+To also install **Playwright** and **python-dotenv** for `fetch_superbill_and_merge.py` (or install everything from the project file):
+
+```
+pip install -r requirements.txt
+python -m playwright install chromium
+```
+
 To also be able to build the `.exe` file, install PyInstaller:
 
 ```
@@ -132,12 +139,28 @@ You can also highlight any block of code, right-click, and choose **Copilot → 
 
 ---
 
+## Lynx fetch: download confirmation popup
+
+The script looks for the in-page prompt **“Access other apps and services on this device”** and clicks **Allow** automatically.
+
+If that does not match your UI, set one of these in `.env` after inspecting the control in DevTools:
+
+- **`LYNX_DOWNLOAD_CONFIRM_SELECTOR`** — CSS selector (highest precedence).
+- **`LYNX_DOWNLOAD_CONFIRM_BUTTON`** — accessible name if it is not **Allow**.
+
+Native `window.confirm` / `alert` is handled automatically by the fetch script.
+
+---
+
 ## Quick reference
 
 | Task | Command |
 |------|---------|
 | Run the app | `python superbill_processor.py` |
+| Fetch Lynx + merge | `python fetch_superbill_and_merge.py --month 03/2026 --master "path\to\master.xlsx" --yes` |
+| Fetch with pauses | `--interactive` / `-i` — Enter before browser; pauses inside `lynx_flow.download_superbill`; Y/n/abort before merge |
 | Build the EXE | `python -m PyInstaller SuperbillProcessor.spec` |
 | Install / update dependencies | `pip install pandas openpyxl tkinterdnd2 pyinstaller` |
+| Install including Playwright | `pip install -r requirements.txt` then `python -m playwright install chromium` |
 | Open Copilot Chat | `Ctrl+Alt+I` |
 | Run with debugger | `F5` in VS Code |
