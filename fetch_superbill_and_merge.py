@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -64,9 +63,15 @@ def main() -> None:
         help="Path to the existing master output workbook (.xlsx)",
     )
     parser.add_argument(
+        "--download-dir",
+        type=Path,
+        default=Path(__file__).resolve().parent / "data",
+        help="Directory to save the downloaded report (default: ./data)",
+    )
+    parser.add_argument(
         "--yes",
         action="store_true",
-        help="Auto-proceed on duplicate prompts (like node superbill_processor.js --yes)",
+        help="Auto-proceed on duplicate prompts during merge",
     )
     parser.add_argument(
         "--headless",
@@ -113,9 +118,8 @@ def main() -> None:
         print(f"ERROR: master file not found: {master}", file=sys.stderr)
         sys.exit(1)
 
-    fd, tmp_path = tempfile.mkstemp(suffix=".xlsx")
-    os.close(fd)
-    tmp_path = Path(tmp_path)
+    download_dir = args.download_dir.resolve()
+    downloaded_path: Path | None = None
 
     try:
         if args.interactive:
@@ -128,12 +132,13 @@ def main() -> None:
             # Native window.alert / confirm / prompt (not custom HTML modals)
             page.on("dialog", lambda dialog: dialog.accept())
             try:
-                download_superbill(
+                saved = download_superbill(
                     page,
-                    str(tmp_path),
+                    str(download_dir),
                     args.month,
                     interactive=args.interactive,
                 )
+                downloaded_path = Path(saved)
             except FlowAborted as e:
                 print(f"Stopped: {e}", file=sys.stderr)
                 sys.exit(130)
@@ -141,7 +146,7 @@ def main() -> None:
                 context.close()
                 browser.close()
 
-        if not tmp_path.is_file() or tmp_path.stat().st_size == 0:
+        if downloaded_path is None or not downloaded_path.is_file() or downloaded_path.stat().st_size == 0:
             print("ERROR: download did not produce a non-empty file.", file=sys.stderr)
             sys.exit(1)
 
@@ -156,14 +161,10 @@ def main() -> None:
                 return True
             return input(f"{msg}\nProceed? [y/N]: ").strip().lower() in ("y", "yes")
 
-        ok = process(str(tmp_path), str(master), log, confirm)
+        ok = process(str(downloaded_path), str(master), log, confirm)
         sys.exit(0 if ok else 1)
     finally:
-        try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except OSError:
-            pass
+        pass
 
 
 if __name__ == "__main__":

@@ -18,10 +18,16 @@ import os
 import shutil
 import tempfile
 import threading
+import traceback
+from datetime import datetime
 
 import pandas as pd
 import openpyxl
+from dotenv import load_dotenv, set_key
 from openpyxl import load_workbook
+from playwright.sync_api import sync_playwright
+
+from lynx_flow import download_superbill, month_date_range
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -243,9 +249,14 @@ def process(input_path, output_path, log, confirm):
 
     # ── 6. Find last non-empty row and append after it ────────────────────────
     insert_after = _last_nonempty_row(ws_out)
-    # Truncate any trailing empty rows beyond insert_after
-    while ws_out.max_row > insert_after:
-        ws_out.delete_rows(ws_out.max_row)
+    # Truncate trailing empty rows only when we have a non-empty anchor row.
+    # For a brand-new/empty workbook insert_after can be 0 while max_row is 1,
+    # and deleting rows in a loop may never converge.
+    if insert_after > 0:
+        while ws_out.max_row > insert_after:
+            ws_out.delete_rows(ws_out.max_row)
+    else:
+        log("  Output workbook appears empty; appending will start at the first row.")
 
     log(f"  Appending after row {insert_after} (last non-empty row in output).")
 
@@ -332,6 +343,10 @@ def process(input_path, output_path, log, confirm):
 _README_PATH = os.path.join(
     getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))),
     "README.md"
+)
+_ENV_PATH = os.path.join(
+    getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))),
+    ".env"
 )
 
 
@@ -436,20 +451,124 @@ def _insert_inline(txt: tk.Text, text: str, base_tag: str):
     if pos < len(text):
         txt.insert("end", text[pos:], base_tag)
 
+
+class ToolTip:
+    def __init__(self, widget, text: str):
+        self.widget = widget
+        self.text = text
+        self.tipwindow = None
+        self.widget.bind("<Enter>", self._show)
+        self.widget.bind("<Leave>", self._hide)
+
+    def _show(self, _event=None):
+        if self.tipwindow or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 18
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self.tipwindow = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            tw,
+            text=self.text,
+            justify="left",
+            background="#ffffe0",
+            relief="solid",
+            borderwidth=1,
+            padx=6,
+            pady=4,
+            font=("Segoe UI", 9),
+        ).pack()
+
+    def _hide(self, _event=None):
+        if self.tipwindow is not None:
+            self.tipwindow.destroy()
+            self.tipwindow = None
+
+
 class App(dnd.TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
         self.title("Superbill Processor")
         self.resizable(True, True)
-        self.minsize(700, 520)
+        self.minsize(780, 620)
+        load_dotenv(_ENV_PATH, override=True)
         self._confirm_event = threading.Event()
         self._confirm_result = False
+        self._fetch_running = False
+        self._merge_running = False
+        self._merge_abort_requested = False
+        self._fetch_abort_requested = False
+        self._fetch_browser = None
+        self._fetch_context = None
         self._build_ui()
 
     # ── layout ────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
         pad = dict(padx=10, pady=4)
+
+        # ── Fetch section ──────────────────────────────────────────────────────
+        frm_fetch = ttk.LabelFrame(self, text="Lynx Fetch")
+        frm_fetch.pack(fill="x", **pad)
+
+        now = datetime.now()
+        self.fetch_month_num_var = tk.IntVar(value=now.month)
+        self.fetch_year_var = tk.IntVar(value=now.year)
+        self.fetch_slow_seconds_var = tk.IntVar(value=2)
+        self.fetch_headless_var = tk.BooleanVar(value=False)
+        self.fetch_download_dir_var = tk.StringVar(value=self._env_get("LYNX_WORK_FOLDER", "data"))
+        self.fetch_result_name_var = tk.StringVar(value="Downloaded file: (none)")
+        self.fetch_status_var = tk.StringVar(value="Fetch status: idle")
+
+        # Keep settings at the top of the Lynx Fetch section
+        settings_row = ttk.Frame(frm_fetch)
+        settings_row.grid(row=0, column=0, columnspan=5, sticky="w", padx=6, pady=(4, 2))
+        ttk.Button(settings_row, text="⚙  Settings", command=self._open_fetch_settings, width=12).pack(side="left")
+        ttk.Button(settings_row, text="ℹ  About", command=_show_about, width=12).pack(side="left", padx=6)
+
+        ttk.Label(frm_fetch, text="Month/Year:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        month_year = ttk.Frame(frm_fetch)
+        month_year.grid(row=1, column=1, sticky="w", padx=4, pady=4)
+        ttk.Spinbox(month_year, from_=1, to=12, textvariable=self.fetch_month_num_var, width=4, format="%02.0f").pack(
+            side="left"
+        )
+        ttk.Label(month_year, text="/").pack(side="left", padx=4)
+        ttk.Spinbox(month_year, from_=2000, to=2100, textvariable=self.fetch_year_var, width=6).pack(side="left")
+        ttk.Label(frm_fetch, text="Slow-mo (sec):").grid(row=1, column=2, sticky="w", padx=16, pady=4)
+        ttk.Spinbox(frm_fetch, from_=0, to=30, textvariable=self.fetch_slow_seconds_var, width=8).grid(
+            row=1, column=3, sticky="w", padx=4, pady=4
+        )
+        ttk.Checkbutton(frm_fetch, text="Headless", variable=self.fetch_headless_var).grid(
+            row=1, column=4, sticky="w", padx=16, pady=4
+        )
+
+        ttk.Label(frm_fetch, text="Download folder:").grid(row=2, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(frm_fetch, textvariable=self.fetch_download_dir_var, width=54).grid(
+            row=2, column=1, columnspan=3, sticky="ew", padx=4, pady=4
+        )
+        ttk.Button(frm_fetch, text="Browse…", command=self._browse_fetch_download_dir).grid(
+            row=2, column=4, sticky="e", padx=4, pady=4
+        )
+
+        fetch_btn_row = ttk.Frame(frm_fetch)
+        fetch_btn_row.grid(row=3, column=0, columnspan=5, sticky="w", padx=6, pady=(4, 6))
+        self.fetch_btn = tk.Button(fetch_btn_row, text="⇩  Run Fetch", command=self._run_fetch, width=16, height=2)
+        self.fetch_btn._base_label = "Run Fetch"
+        self.fetch_btn.pack(side="left")
+        self._set_action_button_state(self.fetch_btn, "idle")
+        ToolTip(
+            self.fetch_btn,
+            "Run Fetch button colors: blue=idle/running, green=last run succeeded, red=last run failed.",
+        )
+
+        ttk.Label(frm_fetch, textvariable=self.fetch_result_name_var).grid(
+            row=4, column=0, columnspan=5, sticky="w", padx=8, pady=(0, 2)
+        )
+        ttk.Label(frm_fetch, textvariable=self.fetch_status_var).grid(
+            row=5, column=0, columnspan=5, sticky="w", padx=8, pady=(0, 4)
+        )
+        frm_fetch.columnconfigure(3, weight=1)
 
         # ── Input file section ────────────────────────────────────────────────
         frm_in = ttk.LabelFrame(self, text="Input Superbill file")
@@ -469,6 +588,9 @@ class App(dnd.TkinterDnD.Tk):
         frm_out.pack(fill="x", **pad)
 
         self.output_path_var = tk.StringVar()
+        default_output = self._env_get("OUTPUT_FILE_PATH", "")
+        if default_output:
+            self.output_path_var.set(default_output)
         ttk.Label(frm_out, text="File:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         ent_out = ttk.Entry(frm_out, textvariable=self.output_path_var, width=55)
         ent_out.grid(row=0, column=1, sticky="ew", padx=4, pady=4)
@@ -481,9 +603,26 @@ class App(dnd.TkinterDnD.Tk):
         # ── Run button ────────────────────────────────────────────────────────
         btn_row_top = ttk.Frame(self)
         btn_row_top.pack(pady=6, fill="x", padx=10)
-        self.run_btn = ttk.Button(btn_row_top, text="▶  Process", command=self._run, width=20)
+        self.run_btn = tk.Button(btn_row_top, text="▶  Run Merge", command=self._run, width=20, height=2)
+        self.run_btn._base_label = "Run Merge"
         self.run_btn.pack(side="left")
-        ttk.Button(btn_row_top, text="ℹ  About", command=_show_about, width=12).pack(side="right")
+        self._set_action_button_state(self.run_btn, "idle")
+        ToolTip(
+            self.run_btn,
+            "Run Merge button colors: blue=idle/running, green=last run succeeded, red=last run failed.",
+        )
+        self.merge_status_var = tk.StringVar(value="Merge status: idle")
+        ttk.Label(btn_row_top, textvariable=self.merge_status_var).pack(side="left", padx=12)
+        self.lifecycle_btn = tk.Button(btn_row_top, command=self._lifecycle_action, width=16, height=2)
+        self.lifecycle_btn.pack(side="right")
+        ToolTip(
+            self.lifecycle_btn,
+            "Lifecycle button: yellow Cancel before start, red Abort while running, green Close after success.",
+        )
+        self._set_lifecycle_button_state("cancel")
+        self.input_path_var.trace_add("write", lambda *_: self._refresh_merge_button_enabled())
+        self.output_path_var.trace_add("write", lambda *_: self._refresh_merge_button_enabled())
+        self._refresh_merge_button_enabled()
 
         # ── Confirm / Abort prompt (hidden until needed) ──────────────────────
         self.frm_confirm = ttk.LabelFrame(self, text="Confirmation required")
@@ -519,6 +658,103 @@ class App(dnd.TkinterDnD.Tk):
             anchor="e", padx=10, pady=(0, 6))
 
     @staticmethod
+    def _env_get(key: str, default: str = "") -> str:
+        return (os.environ.get(key) or default).strip()
+
+    @staticmethod
+    def _month_text(month_num: int, year: int) -> str:
+        return f"{int(month_num):02d}/{int(year)}"
+
+    @staticmethod
+    def _set_action_button_state(btn: tk.Button, state_name: str):
+        palette = {
+            "idle": "#1f6feb",
+            "running": "#1f6feb",
+            "success": "#2ea043",
+            "failed": "#d73a49",
+        }
+        c = palette.get(state_name, palette["idle"])
+        base_label = getattr(btn, "_base_label", btn.cget("text"))
+        icon = {
+            "idle": "▶",
+            "running": "▶",
+            "success": "✔",
+            "failed": "✘",
+        }.get(state_name, "▶")
+        btn.configure(
+            text=f"{icon}  {base_label}",
+            bg=c,
+            activebackground=c,
+            fg="white",
+            activeforeground="white",
+            disabledforeground="white",
+            relief="raised",
+            bd=1,
+        )
+
+    def _set_lifecycle_button_state(self, state_name: str):
+        # cancel (yellow), abort (red), close (green)
+        if state_name == "abort":
+            self.lifecycle_btn.configure(
+                text="✘  Abort",
+                bg="#d73a49",
+                activebackground="#d73a49",
+                fg="white",
+                activeforeground="white",
+            )
+        elif state_name == "close":
+            self.lifecycle_btn.configure(
+                text="✔  Close",
+                bg="#2ea043",
+                activebackground="#2ea043",
+                fg="white",
+                activeforeground="white",
+            )
+        else:
+            self.lifecycle_btn.configure(
+                text="⚠  Cancel",
+                bg="#d4a72c",
+                activebackground="#d4a72c",
+                fg="black",
+                activeforeground="black",
+            )
+
+    def _refresh_lifecycle_state(self):
+        if self._fetch_running or self._merge_running:
+            self._set_lifecycle_button_state("abort")
+            return
+        # Once a run succeeded, present Close; otherwise keep Cancel
+        fetch_ok = "finished successfully" in self.fetch_status_var.get().lower()
+        merge_ok = "finished successfully" in self.merge_status_var.get().lower()
+        if fetch_ok or merge_ok:
+            self._set_lifecycle_button_state("close")
+        else:
+            self._set_lifecycle_button_state("cancel")
+
+    def _lifecycle_action(self):
+        if self._fetch_running or self._merge_running:
+            self._log("Abort requested by user.")
+            self._fetch_abort_requested = True
+            self._merge_abort_requested = True
+            # If merge waits for confirmation, resolve to abort now.
+            if hasattr(self, "_confirm_event") and not self._confirm_event.is_set():
+                self._resolve_confirm(False)
+            # Try to stop Playwright fetch quickly.
+            try:
+                if self._fetch_context is not None:
+                    self._fetch_context.close()
+            except Exception:
+                pass
+            try:
+                if self._fetch_browser is not None:
+                    self._fetch_browser.close()
+            except Exception:
+                pass
+            return
+        # Not running: Cancel/Close both close the app.
+        self.destroy()
+
+    @staticmethod
     def _clean_drop(data: str) -> str:
         """Normalize a drag-and-drop path: strip curly braces added for paths with spaces."""
         data = data.strip()
@@ -526,12 +762,24 @@ class App(dnd.TkinterDnD.Tk):
             data = data[1:-1]
         return data
 
+    def _merge_preconditions_ok(self) -> bool:
+        input_path = self.input_path_var.get().strip()
+        output_path = self.output_path_var.get().strip()
+        return bool(input_path and output_path and os.path.isfile(input_path) and os.path.isfile(output_path))
+
+    def _refresh_merge_button_enabled(self):
+        if self._merge_running:
+            self.run_btn.configure(state="disabled")
+            return
+        self.run_btn.configure(state=("normal" if self._merge_preconditions_ok() else "disabled"))
+
     def _browse_input(self):
         path = filedialog.askopenfilename(
             title="Select input Superbill file",
             filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")])
         if path:
             self.input_path_var.set(path)
+            self._refresh_merge_button_enabled()
 
     def _browse_output(self):
         path = filedialog.askopenfilename(
@@ -539,12 +787,82 @@ class App(dnd.TkinterDnD.Tk):
             filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")])
         if path:
             self.output_path_var.set(path)
+            self._refresh_merge_button_enabled()
+
+    def _browse_fetch_download_dir(self):
+        path = filedialog.askdirectory(title="Select download folder")
+        if path:
+            self.fetch_download_dir_var.set(path)
+
+    def _open_fetch_settings(self):
+        win = tk.Toplevel(self)
+        win.title("Fetch Settings")
+        win.resizable(False, False)
+        win.transient(self)
+        win.grab_set()
+
+        url_var = tk.StringVar(value=self._env_get("LYNX_URL"))
+        user_var = tk.StringVar(value=self._env_get("LYNX_USER"))
+        pw_var = tk.StringVar(value=self._env_get("LYNX_PASSWORD"))
+        work_var = tk.StringVar(value=self._env_get("LYNX_WORK_FOLDER", "data"))
+        output_var = tk.StringVar(value=self._env_get("OUTPUT_FILE_PATH", self.output_path_var.get().strip()))
+
+        frm = ttk.Frame(win, padding=10)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Lynx URL").grid(row=0, column=0, sticky="w", padx=4, pady=4)
+        ttk.Entry(frm, textvariable=url_var, width=58).grid(row=0, column=1, sticky="ew", padx=4, pady=4)
+        ttk.Label(frm, text="Lynx User").grid(row=1, column=0, sticky="w", padx=4, pady=4)
+        ttk.Entry(frm, textvariable=user_var, width=58).grid(row=1, column=1, sticky="ew", padx=4, pady=4)
+        ttk.Label(frm, text="Lynx Password").grid(row=2, column=0, sticky="w", padx=4, pady=4)
+        ttk.Entry(frm, textvariable=pw_var, width=58, show="*").grid(row=2, column=1, sticky="ew", padx=4, pady=4)
+        ttk.Label(frm, text="Work Folder").grid(row=3, column=0, sticky="w", padx=4, pady=4)
+        ttk.Entry(frm, textvariable=work_var, width=58).grid(row=3, column=1, sticky="ew", padx=4, pady=4)
+        ttk.Label(frm, text="Output File Path").grid(row=4, column=0, sticky="w", padx=4, pady=4)
+        out_row = ttk.Frame(frm)
+        out_row.grid(row=4, column=1, sticky="ew", padx=4, pady=4)
+        ttk.Entry(out_row, textvariable=output_var, width=48).pack(side="left", fill="x", expand=True)
+
+        def pick_output():
+            p = filedialog.askopenfilename(
+                title="Select existing output file to append to",
+                filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")],
+            )
+            if p:
+                output_var.set(p)
+
+        ttk.Button(out_row, text="Browse…", command=pick_output).pack(side="left", padx=(6, 0))
+
+        def save():
+            if not os.path.exists(_ENV_PATH):
+                with open(_ENV_PATH, "w", encoding="utf-8"):
+                    pass
+            set_key(_ENV_PATH, "LYNX_URL", url_var.get().strip())
+            set_key(_ENV_PATH, "LYNX_USER", user_var.get().strip())
+            set_key(_ENV_PATH, "LYNX_PASSWORD", pw_var.get().strip())
+            set_key(_ENV_PATH, "LYNX_WORK_FOLDER", work_var.get().strip() or "data")
+            set_key(_ENV_PATH, "OUTPUT_FILE_PATH", output_var.get().strip())
+            load_dotenv(_ENV_PATH, override=True)
+            self.fetch_download_dir_var.set(self._env_get("LYNX_WORK_FOLDER", "data"))
+            if output_var.get().strip():
+                self.output_path_var.set(output_var.get().strip())
+                self._refresh_merge_button_enabled()
+            self._log("Fetch settings saved to .env")
+            win.destroy()
+
+        row = ttk.Frame(frm)
+        row.grid(row=5, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        ttk.Button(row, text="Cancel", command=win.destroy).pack(side="right", padx=4)
+        ttk.Button(row, text="Save", command=save).pack(side="right", padx=4)
+        frm.columnconfigure(1, weight=1)
 
     # ── confirmation helpers ──────────────────────────────────────────────────
 
     def _show_confirm(self, msg):
         """Called from the main thread to display the confirm panel."""
         self.confirm_msg_var.set(msg)
+        if self._merge_running:
+            self.merge_status_var.set("Merge status: waiting for confirmation")
         self.frm_confirm.pack(fill="x", padx=10, pady=4)
 
     def _hide_confirm(self):
@@ -583,6 +901,96 @@ class App(dnd.TkinterDnD.Tk):
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
 
+    def _run_fetch(self):
+        if self._fetch_running:
+            return
+
+        month = self._month_text(self.fetch_month_num_var.get(), self.fetch_year_var.get())
+        try:
+            month_date_range(month)
+        except Exception as e:
+            self._log(f"⚠  Invalid month: {e}")
+            return
+
+        load_dotenv(_ENV_PATH, override=True)
+        url = self._env_get("LYNX_URL")
+        user = self._env_get("LYNX_USER")
+        pw = self._env_get("LYNX_PASSWORD")
+        if not url or not user or not pw:
+            self._log("⚠  Missing LYNX_URL / LYNX_USER / LYNX_PASSWORD. Open Settings first.")
+            return
+
+        download_dir = self.fetch_download_dir_var.get().strip() or self._env_get("LYNX_WORK_FOLDER", "data")
+        if not download_dir:
+            download_dir = "data"
+        try:
+            slow_mo = max(0, int(self.fetch_slow_seconds_var.get())) * 1000
+        except Exception:
+            self._log("⚠  Slow-mo seconds must be an integer.")
+            return
+        headless = bool(self.fetch_headless_var.get())
+
+        self._fetch_running = True
+        self._fetch_abort_requested = False
+        self.fetch_btn.configure(state="disabled")
+        self._set_action_button_state(self.fetch_btn, "running")
+        self._refresh_lifecycle_state()
+        self.fetch_status_var.set("Fetch status: running")
+        self.fetch_result_name_var.set("Downloaded file: (running...)")
+        self._log(f"Starting fetch | month={month} headless={headless} slow_mo={slow_mo} folder={download_dir}")
+
+        def worker():
+            try:
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=headless, slow_mo=slow_mo)
+                    context = browser.new_context(accept_downloads=True)
+                    self._fetch_browser = browser
+                    self._fetch_context = context
+                    page = context.new_page()
+                    page.on("dialog", lambda dialog: dialog.accept())
+                    try:
+                        saved = download_superbill(
+                            page,
+                            download_dir,
+                            month,
+                            interactive=False,
+                        )
+                    finally:
+                        context.close()
+                        browser.close()
+                        self._fetch_context = None
+                        self._fetch_browser = None
+                self.after(0, lambda: self._on_fetch_success(saved))
+            except Exception as e:
+                self.after(0, lambda: self._on_fetch_error(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_fetch_success(self, saved_path: str):
+        self._fetch_running = False
+        self.fetch_btn.configure(state="normal")
+        self._set_action_button_state(self.fetch_btn, "success")
+        self._refresh_lifecycle_state()
+        self.input_path_var.set(saved_path)  # feed directly into merge stage
+        self._refresh_merge_button_enabled()
+        self.fetch_result_name_var.set(f"Downloaded file: {os.path.basename(saved_path)}")
+        self.fetch_status_var.set("Fetch status: finished successfully")
+        self._log(f"✓  Fetch completed: {saved_path}")
+        self._log("✓  Input file auto-filled for merge stage.")
+
+    def _on_fetch_error(self, err: Exception):
+        self._fetch_running = False
+        self.fetch_btn.configure(state="normal")
+        if self._fetch_abort_requested:
+            self.fetch_status_var.set("Fetch status: aborted")
+            self._log("⚠  Fetch aborted by user.")
+        else:
+            self.fetch_status_var.set("Fetch status: failed")
+            self._log(f"ERROR during fetch: {err}")
+        self._set_action_button_state(self.fetch_btn, "failed")
+        self._refresh_lifecycle_state()
+        self.fetch_result_name_var.set("Downloaded file: (none)")
+
     # ── run ───────────────────────────────────────────────────────────────────
 
     def _run(self):
@@ -602,17 +1010,51 @@ class App(dnd.TkinterDnD.Tk):
             self._log(f"⚠  Output file not found: {output_path}")
             return
 
+        self._merge_running = True
+        self._merge_abort_requested = False
         self.run_btn.configure(state="disabled")
+        self._set_action_button_state(self.run_btn, "running")
+        self._refresh_lifecycle_state()
+        self.merge_status_var.set("Merge status: running")
         self._log("=" * 60)
-        self._log("Starting processing…")
+        self._log("Starting merge…")
 
         def worker():
             try:
-                process(input_path, output_path, self._log, self.confirm)
+                ok = process(input_path, output_path, self._log, self.confirm)
+                self.after(0, lambda: self._on_merge_done(ok))
+            except Exception as e:
+                tb = traceback.format_exc()
+                self._log(f"ERROR during merge: {e}")
+                self._log(tb)
+                self.after(0, lambda: self._on_merge_error(e))
             finally:
-                self.after(0, lambda: self.run_btn.configure(state="normal"))
+                self.after(0, self._on_merge_finish_ui)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _on_merge_finish_ui(self):
+        self._merge_running = False
+        self._refresh_merge_button_enabled()
+        self._refresh_lifecycle_state()
+
+    def _on_merge_done(self, ok: bool):
+        if ok:
+            self._set_action_button_state(self.run_btn, "success")
+            self.merge_status_var.set("Merge status: finished successfully")
+            self._log("✓  Merge finished successfully.")
+        else:
+            self._set_action_button_state(self.run_btn, "failed")
+            if self._merge_abort_requested:
+                self.merge_status_var.set("Merge status: aborted")
+                self._log("⚠  Merge aborted by user.")
+            else:
+                self.merge_status_var.set("Merge status: finished with failure/abort")
+                self._log("⚠  Merge finished with failure or user abort.")
+
+    def _on_merge_error(self, err: Exception):
+        self._set_action_button_state(self.run_btn, "failed")
+        self.merge_status_var.set(f"Merge status: error ({err})")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

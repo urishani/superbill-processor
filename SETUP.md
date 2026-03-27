@@ -157,8 +157,10 @@ Native `window.confirm` / `alert` is handled automatically by the fetch script.
 | Task | Command |
 |------|---------|
 | Run the app | `python superbill_processor.py` |
+| Run top-level fetch + merge launcher UI | `python superbill_workflow_ui.py` |
 | Fetch Lynx + merge | `python fetch_superbill_and_merge.py --month 03/2026 --master "path\to\master.xlsx" --yes` |
-| Fetch with pauses | `--interactive` / `-i` — Enter before browser; pauses inside `lynx_flow.download_superbill`; Y/n/abort before merge |
+| Save download to custom folder | add `--download-dir "path\to\downloads"` |
+| Interactive mode | default is interactive; add `--no-interactive` / `--batch` / `-b` for unattended runs |
 | Build the EXE | `python -m PyInstaller SuperbillProcessor.spec` |
 | Install / update dependencies | `pip install pandas openpyxl tkinterdnd2 pyinstaller` |
 | Install including Playwright | `pip install -r requirements.txt` then `python -m playwright install chromium` |

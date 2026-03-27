@@ -104,25 +104,29 @@ def _click_download_confirmation_if_configured(page: Page) -> None:
 
 def download_superbill(
     page: Page,
-    download_path: str,
+    download_dir: str,
     month: str,
     *,
     interactive: bool = True,
-) -> None:
+) -> str:
     """
-    Log into Lynx, run Superbill for the given month, save Excel to download_path.
+    Log into Lynx, run Superbill for the given month, save Excel to download_dir.
 
     Parameters
     ----------
     page : Page
         Playwright page (caller uses accept_downloads=True).
-    download_path : str
-        Where to save the downloaded .xlsx.
+    download_dir : str
+        Directory where the downloaded file will be saved using suggested filename.
     month : str
         Month as mm/yyyy; report covers the first through last day of that month
         (filled as mm/dd/yyyy in Start / End Date of Service).
     interactive : bool
         If True (default), pause at _flow_pause() breakpoints (terminal: Enter / abort).
+    Returns
+    -------
+    str
+        Full path to the saved downloaded file.
     """
     url = (os.environ.get("LYNX_URL") or "").strip()
     user = (os.environ.get("LYNX_USER") or "").strip()
@@ -164,9 +168,16 @@ def download_superbill(
     except Exception:
         pass
 
-    download.save_as(download_path)
-    print(f"[lynx] download saved to {download_path}", flush=True)
+    suggested_name = getattr(download, "suggested_filename", "") or f"lynx-superbill-{month.replace('/', '-')}.xlsx"
+    safe_name = re.sub(r'[<>:\"/\\\\|?*]+', "_", suggested_name)
+    target_dir = Path(download_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    saved_path = target_dir / safe_name
+
+    download.save_as(str(saved_path))
+    print(f"[lynx] download saved to {saved_path}", flush=True)
     page.wait_for_timeout(1000)
     page.get_by_text("Log Out").click()
+    return str(saved_path)
 
 
