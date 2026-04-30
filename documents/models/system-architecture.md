@@ -122,7 +122,7 @@ Description:
 # 4. Expanded Architecture (Detailed)
 
 ```mermaid
-    flowchart TB
+    flowchart TD
 
     %% Frontend
     PatientApp[Patient App]
